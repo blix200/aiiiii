@@ -1,0 +1,80 @@
+-- esp.lua
+local ESP = {}
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+-- States
+local chamsEnabled = false
+local namesEnabled = false
+local tracersEnabled = false
+
+-- Storage
+local highlights = {}
+local drawings = {}
+
+-- Chams
+function ESP:ToggleChams(state)
+    chamsEnabled = state ~= nil and state or not chamsEnabled
+    if chamsEnabled then
+        for _,plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                local hl = Instance.new("Highlight")
+                hl.FillColor = Color3.fromRGB(0,200,255)
+                hl.OutlineColor = Color3.new(1,1,1)
+                hl.Adornee = plr.Character
+                hl.Parent = plr.Character
+                highlights[plr] = hl
+            end
+        end
+    else
+        for _,hl in pairs(highlights) do hl:Destroy() end
+        highlights = {}
+    end
+    return chamsEnabled
+end
+
+-- Names + Tracers (Drawing)
+RunService.RenderStepped:Connect(function()
+    for _,d in pairs(drawings) do d:Remove() end
+    drawings = {}
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("Head") then
+            local pos,onscreen = Camera:WorldToViewportPoint(plr.Character.Head.Position)
+            if onscreen then
+                if namesEnabled then
+                    local t = Drawing.new("Text")
+                    t.Text = plr.Name
+                    t.Position = Vector2.new(pos.X, pos.Y-20)
+                    t.Color = Color3.fromRGB(255,255,255)
+                    t.Size = 16
+                    t.Center = true
+                    t.Visible = true
+                    table.insert(drawings,t)
+                end
+                if tracersEnabled then
+                    local l = Drawing.new("Line")
+                    l.From = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y)
+                    l.To = Vector2.new(pos.X,pos.Y)
+                    l.Color = Color3.fromRGB(0,200,255)
+                    l.Thickness = 1.5
+                    l.Visible = true
+                    table.insert(drawings,l)
+                end
+            end
+        end
+    end
+end)
+
+function ESP:ToggleNames(state)
+    namesEnabled = state ~= nil and state or not namesEnabled
+    return namesEnabled
+end
+
+function ESP:ToggleTracers(state)
+    tracersEnabled = state ~= nil and state or not tracersEnabled
+    return tracersEnabled
+end
+
+return ESP

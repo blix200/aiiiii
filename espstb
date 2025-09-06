@@ -1,6 +1,7 @@
--- espstb (Drawing API ESP system)
--- Features: Chams, Names, Tracers, Boxes, Health Bars
--- Supports RGB color updates, team check, and whitelist
+-- espstb (fixed + extended)
+-- Features: Chams (Highlight), Names, Tracers, Boxes, Health Bars
+-- Supports: RGB setters, team check, whitelist, Add/Remove whitelist entries
+-- Uses Drawing API for names/tracers/boxes/healthbars
 
 local ESP = {}
 local Players = game:GetService("Players")
@@ -19,7 +20,7 @@ local states = {
     whitelist = false,
 }
 
--- Colors
+-- Colors (defaults)
 local colors = {
     chamsFill = Color3.fromRGB(0,200,255),
     chamsOutline = Color3.fromRGB(255,255,255),
@@ -29,15 +30,15 @@ local colors = {
     healthbar = Color3.fromRGB(0,255,0),
 }
 
--- Data
-local drawings = {}
-local highlights = {}
-local whitelist = {} -- fill with player.UserId you want to ignore
+-- Internal storage
+local drawings = {}           -- per-frame drawing objects
+local highlights = {}         -- Highlight instances keyed by Player
+local whitelist = {}          -- userId -> true
 
 ----------------------------------------------------------------
 -- Utility
 ----------------------------------------------------------------
-local function isFriend(plr)
+local function isWhitelisted(plr)
     if not states.whitelist then return false end
     return whitelist[plr.UserId] == true
 end
@@ -50,119 +51,148 @@ local function isSameTeam(plr)
     return false
 end
 
-local function addHighlight(plr)
-    if highlights[plr] then highlights[plr]:Destroy() end
-    if plr.Character then
-        local hl = Instance.new("Highlight")
-        hl.FillColor = colors.chamsFill
-        hl.OutlineColor = colors.chamsOutline
-        hl.Adornee = plr.Character
-        hl.Parent = plr.Character
-        highlights[plr] = hl
+local function safeDestroy(obj)
+    if obj and obj.Destroy then
+        pcall(function() obj:Destroy() end)
     end
 end
 
-local function removeHighlight(plr)
-    if highlights[plr] then highlights[plr]:Destroy() end
+local function addHighlightForPlayer(plr)
+    -- create or refresh highlight for a player's current character
+    safeDestroy(highlights[plr])
+    if not plr.Character then return end
+    local ok, hl = pcall(function()
+        local h = Instance.new("Highlight")
+        h.FillColor = colors.chamsFill
+        h.OutlineColor = colors.chamsOutline
+        h.Adornee = plr.Character
+        h.Parent = plr.Character
+        return h
+    end)
+    if ok and hl then highlights[plr] = hl end
+end
+
+local function removeHighlightForPlayer(plr)
+    safeDestroy(highlights[plr])
     highlights[plr] = nil
 end
 
 ----------------------------------------------------------------
--- Drawing ESP
+-- Drawing loop (names / tracers / boxes / healthbars)
 ----------------------------------------------------------------
 RunService.RenderStepped:Connect(function()
-    for _, d in pairs(drawings) do d:Remove() end
+    -- remove previous drawings
+    for i=1, #drawings do
+        local d = drawings[i]
+        pcall(function() d:Remove() end)
+    end
     drawings = {}
 
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") and plr.Character:FindFirstChild("Head") then
-            if isFriend(plr) or isSameTeam(plr) then continue end
+    local players = Players:GetPlayers()
+    local viewSize = Camera.ViewportSize
 
-            local root = plr.Character.HumanoidRootPart
-            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
-            local head = plr.Character.Head
+    for _, plr in ipairs(players) do
+        if plr ~= LocalPlayer and plr.Character then
+            -- skip if whitelisted or same team (when toggled)
+            if isWhitelisted(plr) or isSameTeam(plr) then
+                -- skip drawing
+            else
+                local head = plr.Character:FindFirstChild("Head")
+                local root = plr.Character:FindFirstChild("HumanoidRootPart")
+                local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+                if head and root then
+                    local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+                    if onScreen then
+                        -- helper to create and store drawing safely
+                        local function newDrawing(kind, props)
+                            local ok, d = pcall(function() return Drawing.new(kind) end)
+                            if not ok or not d then return nil end
+                            for k,v in pairs(props) do
+                                pcall(function() d[k] = v end)
+                            end
+                            table.insert(drawings, d)
+                            return d
+                        end
 
-            local pos, onscreen = Camera:WorldToViewportPoint(head.Position)
-            if not onscreen then continue end
+                        -- Name
+                        if states.names then
+                            newDrawing("Text", {
+                                Text = plr.Name,
+                                Position = Vector2.new(screenPos.X, screenPos.Y - 20),
+                                Color = colors.name,
+                                Size = 16,
+                                Center = true,
+                                Outline = true,
+                                Visible = true,
+                            })
+                        end
 
-            local function newDrawing(type, props)
-                local d = Drawing.new(type)
-                for k,v in pairs(props) do d[k] = v end
-                table.insert(drawings, d)
-                return d
-            end
+                        -- Tracer
+                        if states.tracers then
+                            newDrawing("Line", {
+                                From = Vector2.new(viewSize.X/2, viewSize.Y),
+                                To = Vector2.new(screenPos.X, screenPos.Y),
+                                Color = colors.tracer,
+                                Thickness = 1.5,
+                                Visible = true,
+                            })
+                        end
 
-            -- Name
-            if states.names then
-                newDrawing("Text", {
-                    Text = plr.Name,
-                    Position = Vector2.new(pos.X, pos.Y - 20),
-                    Color = colors.name,
-                    Size = 16,
-                    Center = true,
-                    Outline = true,
-                    Visible = true,
-                })
-            end
+                        -- Box & Health
+                        if states.boxes or states.healthbars then
+                            -- compute AABB box screen rect using 8 corners
+                            local cframe = root.CFrame
+                            local size = Vector3.new(2, 3, 1.5) -- rough avatar size, works for most
+                            local corners = {
+                                cframe * Vector3.new(-size.X/2, -size.Y/2, -size.Z/2),
+                                cframe * Vector3.new(-size.X/2,  size.Y/2, -size.Z/2),
+                                cframe * Vector3.new( size.X/2,  size.Y/2, -size.Z/2),
+                                cframe * Vector3.new( size.X/2, -size.Y/2, -size.Z/2),
+                                cframe * Vector3.new(-size.X/2, -size.Y/2,  size.Z/2),
+                                cframe * Vector3.new(-size.X/2,  size.Y/2,  size.Z/2),
+                                cframe * Vector3.new( size.X/2,  size.Y/2,  size.Z/2),
+                                cframe * Vector3.new( size.X/2, -size.Y/2,  size.Z/2),
+                            }
+                            local screenCorners = {}
+                            for _, corner in ipairs(corners) do
+                                local sp, vis = Camera:WorldToViewportPoint(corner)
+                                table.insert(screenCorners, Vector2.new(sp.X, sp.Y))
+                            end
 
-            -- Tracers
-            if states.tracers then
-                newDrawing("Line", {
-                    From = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y),
-                    To = Vector2.new(pos.X, pos.Y),
-                    Color = colors.tracer,
-                    Thickness = 1.5,
-                    Visible = true,
-                })
-            end
+                            local minX, minY = math.huge, math.huge
+                            local maxX, maxY = -math.huge, -math.huge
+                            for _, v in ipairs(screenCorners) do
+                                minX = math.min(minX, v.X)
+                                minY = math.min(minY, v.Y)
+                                maxX = math.max(maxX, v.X)
+                                maxY = math.max(maxY, v.Y)
+                            end
 
-            -- Boxes + Health
-            if states.boxes or states.healthbars then
-                local cframe = root.CFrame
-                local size = Vector3.new(2, 3, 1.5)
-                local corners = {
-                    cframe * Vector3.new(-1, -2, -1),
-                    cframe * Vector3.new(-1,  2, -1),
-                    cframe * Vector3.new( 1,  2, -1),
-                    cframe * Vector3.new( 1, -2, -1),
-                    cframe * Vector3.new(-1, -2,  1),
-                    cframe * Vector3.new(-1,  2,  1),
-                    cframe * Vector3.new( 1,  2,  1),
-                    cframe * Vector3.new( 1, -2,  1),
-                }
-                local screenCorners = {}
-                for _, corner in ipairs(corners) do
-                    local screenPos, vis = Camera:WorldToViewportPoint(corner)
-                    table.insert(screenCorners, Vector2.new(screenPos.X, screenPos.Y))
-                end
-                local minX, minY = math.huge, math.huge
-                local maxX, maxY = -math.huge, -math.huge
-                for _, v in ipairs(screenCorners) do
-                    minX = math.min(minX, v.X)
-                    minY = math.min(minY, v.Y)
-                    maxX = math.max(maxX, v.X)
-                    maxY = math.max(maxY, v.Y)
-                end
-                if states.boxes then
-                    newDrawing("Square", {
-                        Position = Vector2.new(minX, minY),
-                        Size = Vector2.new(maxX - minX, maxY - minY),
-                        Color = colors.box,
-                        Thickness = 1,
-                        Filled = false,
-                        Visible = true,
-                    })
-                end
-                if states.healthbars and hum then
-                    local hp = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
-                    local barHeight = (maxY - minY) * hp
-                    newDrawing("Line", {
-                        From = Vector2.new(minX - 5, maxY),
-                        To = Vector2.new(minX - 5, maxY - barHeight),
-                        Color = colors.healthbar,
-                        Thickness = 3,
-                        Visible = true,
-                    })
+                            if states.boxes then
+                                newDrawing("Square", {
+                                    Position = Vector2.new(minX, minY),
+                                    Size = Vector2.new(math.max(1, maxX - minX), math.max(1, maxY - minY)),
+                                    Color = colors.box,
+                                    Thickness = 1,
+                                    Filled = false,
+                                    Visible = true,
+                                })
+                            end
+
+                            if states.healthbars and hum then
+                                local hp = 0
+                                pcall(function() hp = math.clamp(hum.Health / (hum.MaxHealth > 0 and hum.MaxHealth or 1), 0, 1) end)
+                                local barHeight = (maxY - minY) * hp
+                                newDrawing("Line", {
+                                    From = Vector2.new(minX - 6, maxY),
+                                    To = Vector2.new(minX - 6, maxY - barHeight),
+                                    Color = colors.healthbar,
+                                    Thickness = 4,
+                                    Visible = true,
+                                })
+                            end
+                        end
+                    end
                 end
             end
         end
@@ -170,69 +200,118 @@ RunService.RenderStepped:Connect(function()
 end)
 
 ----------------------------------------------------------------
--- Toggle functions
+-- Player/Character wiring
+----------------------------------------------------------------
+local function onPlayerAdded(plr)
+    -- ensure highlight is refreshed when character spawns
+    plr.CharacterAdded:Connect(function(char)
+        -- small delay for char to settle
+        task.wait(0.25)
+        if states.chams and char then
+            addHighlightForPlayer(plr)
+        end
+    end)
+    -- if chams already enabled and they have character now, create highlight
+    if states.chams and plr.Character then
+        addHighlightForPlayer(plr)
+    end
+end
+
+Players.PlayerAdded:Connect(function(plr) onPlayerAdded(plr) end)
+Players.PlayerRemoving:Connect(function(plr)
+    removeHighlightForPlayer(plr)
+    whitelist[plr.UserId] = nil
+end)
+
+-- attach for existing players now
+for _,plr in ipairs(Players:GetPlayers()) do
+    if plr ~= LocalPlayer then onPlayerAdded(plr) end
+end
+
+----------------------------------------------------------------
+-- Toggle functions (exposed)
 ----------------------------------------------------------------
 function ESP:ToggleChams(state)
-    states.chams = state ~= nil and state or not states.chams
+    states.chams = (state ~= nil) and state or not states.chams
     if states.chams then
         for _,plr in ipairs(Players:GetPlayers()) do
-            if plr ~= LocalPlayer then addHighlight(plr) end
+            if plr ~= LocalPlayer and plr.Character then
+                addHighlightForPlayer(plr)
+            end
         end
     else
-        for _,hl in pairs(highlights) do hl:Destroy() end
-        highlights = {}
+        for plr,_ in pairs(highlights) do
+            removeHighlightForPlayer(plr)
+        end
     end
     return states.chams
 end
 
 function ESP:ToggleNames(state)
-    states.names = state ~= nil and state or not states.names
+    states.names = (state ~= nil) and state or not states.names
     return states.names
 end
 
 function ESP:ToggleTracers(state)
-    states.tracers = state ~= nil and state or not states.tracers
+    states.tracers = (state ~= nil) and state or not states.tracers
     return states.tracers
 end
 
 function ESP:ToggleBoxes(state)
-    states.boxes = state ~= nil and state or not states.boxes
+    states.boxes = (state ~= nil) and state or not states.boxes
     return states.boxes
 end
 
 function ESP:ToggleHealthBars(state)
-    states.healthbars = state ~= nil and state or not states.healthbars
+    states.healthbars = (state ~= nil) and state or not states.healthbars
     return states.healthbars
 end
 
 function ESP:ToggleTeamCheck(state)
-    states.teamcheck = state ~= nil and state or not states.teamcheck
+    states.teamcheck = (state ~= nil) and state or not states.teamcheck
     return states.teamcheck
 end
 
 function ESP:ToggleWhitelist(state)
-    states.whitelist = state ~= nil and state or not states.whitelist
+    states.whitelist = (state ~= nil) and state or not states.whitelist
     return states.whitelist
 end
 
 ----------------------------------------------------------------
--- Color setters
+-- Whitelist management
 ----------------------------------------------------------------
-function ESP:SetChamsFillColor(c) colors.chamsFill = c for _,hl in pairs(highlights) do hl.FillColor = c end end
-function ESP:SetChamsOutlineColor(c) colors.chamsOutline = c for _,hl in pairs(highlights) do hl.OutlineColor = c end end
+function ESP:AddWhitelistUserId(id)
+    if type(id) ~= "number" then return false end
+    whitelist[id] = true
+    return true
+end
+function ESP:RemoveWhitelistUserId(id)
+    whitelist[id] = nil
+    return true
+end
+function ESP:GetWhitelistUserIds()
+    local out = {}
+    for id,_ in pairs(whitelist) do table.insert(out, id) end
+    return out
+end
+
+----------------------------------------------------------------
+-- Color setters (exposed)
+----------------------------------------------------------------
+function ESP:SetChamsFillColor(c) colors.chamsFill = c; for plr,hl in pairs(highlights) do pcall(function() hl.FillColor = c end) end end
+function ESP:SetChamsOutlineColor(c) colors.chamsOutline = c; for plr,hl in pairs(highlights) do pcall(function() hl.OutlineColor = c end) end end
 function ESP:SetTracerColor(c) colors.tracer = c end
 function ESP:SetNameColor(c) colors.name = c end
 function ESP:SetBoxColor(c) colors.box = c end
 function ESP:SetHealthbarColor(c) colors.healthbar = c end
 
 ----------------------------------------------------------------
--- Player connections
+-- Safe accessor for states (optional)
 ----------------------------------------------------------------
-Players.PlayerAdded:Connect(function(plr)
-    if states.chams then addHighlight(plr) end
-end)
-Players.PlayerRemoving:Connect(function(plr)
-    removeHighlight(plr)
-end)
+function ESP:GetStates()
+    local copy = {}
+    for k,v in pairs(states) do copy[k] = v end
+    return copy
+end
 
 return ESP
